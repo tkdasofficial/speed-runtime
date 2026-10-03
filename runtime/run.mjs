@@ -20,8 +20,8 @@ async function report(r) {
 function run(cmd, args, extraEnv = {}, timeoutMs = 8 * 60_000) {
   return new Promise((done) => {
     let out = "";
-    const p = spawn(cmd, args, { cwd: ws, env: { PATH: process.env.PATH, HOME: process.env.HOME, CI: "1", NODE_ENV: "development", FORCE_COLOR: "0", ...extraEnv }, shell: false });
-    const add = (d) => { out += d.toString(); if (out.length > MAX) out = out.slice(-MAX); };
+    const p = spawn(cmd, args, { cwd: ws, env: { PATH: process.env.PATH, HOME: process.env.HOME, CI: "1", NODE_ENV: "development", FORCE_COLOR: "0", NO_COLOR: "1", ...extraEnv }, shell: false });
+    const add = (d) => { out += d.toString().replace(/\x1b\[[0-9;]*m/g, ""); if (out.length > MAX) out = out.slice(-MAX); };
     p.stdout.on("data", add); p.stderr.on("data", add);
     const t = setTimeout(() => { add(`\n[timed out after ${timeoutMs / 1000}s]`); p.kill("SIGKILL"); }, timeoutMs);
     p.on("close", (code) => { clearTimeout(t); done({ code: code ?? 1, out }); });
