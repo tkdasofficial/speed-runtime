@@ -16,6 +16,67 @@ async function report(r) {
   console.log(`reported ${res.status}`);
 }
 
+async function event(body) {
+  try {
+    const res = await fetch(`${API_URL}/runtime/job/${JOB_ID}/event`, { method: "POST", headers: { ...auth, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    return res.ok ? await res.json() : { stop: res.status === 401 };
+  } catch { return { stop: false }; }
+}
+const childEnv = (extra = {}) => ({ PATH: process.env.PATH, HOME: process.env.HOME, CI: "1", NODE_ENV: "development", FORCE_COLOR: "0", NO_COLOR: "1", ...extra });
+const strip = (d) => d.toString().replace(/\x1b\[[0-9;]*m/g, "");
+
+// Exact argv (never a shell), separate stdout/stderr, hard timeout. Used by run_command.
+function runSplit(cmd, args, extraEnv, timeoutMs) {
+  return new Promise((done) => {
+    let stdout = "", stderr = "", timedOut = false;
+    const p = spawn(cmd, args, { cwd: ws, env: childEnv(extraEnv), shell: false });
+    p.stdout.on("data", (d) => { stdout = (stdout + strip(d)).slice(-MAX); });
+    p.stderr.on("data", (d) => { stderr = (stderr + strip(d)).slice(-MAX); });
+    const t = setTimeout(() => { timedOut = true; p.kill("SIGKILL"); }, timeoutMs);
+    p.on("close", (code) => { clearTimeout(t); done({ code: timedOut ? 124 : code ?? 1, stdout, stderr, timedOut }); });
+    p.on("error", (e) => { clearTimeout(t); done({ code: 127, stdout, stderr: stderr + String(e), timedOut }); });
+  });
+}
+
+// Long-running dev server: start, detect readiness by HTTP probe, heartbeat (stop on request or max lifetime), kill the whole group.
+async function devServer(spec, pkg, deps, env, maxMs, log) {
+  const port = 5173;
+  let cmd, args;
+  if (pkg?.scripts?.dev) { cmd = "npm"; args = ["run", "dev", "--", ...(deps.vite ? ["--host", "127.0.0.1", "--port", String(port), "--strictPort"] : [])]; }
+  else if (deps.vite) { cmd = "npx"; args = ["--no-install", "vite", "--host", "127.0.0.1", "--port", String(port), "--strictPort"]; }
+  else if (existsSync(join(ws, "index.html"))) { cmd = "npx"; args = ["-y", "serve@14", "-l", `tcp://127.0.0.1:${port}`, "--no-clipboard", "."]; }
+  else return { ok: false, phase: "failed", exitCode: 1, output: "This project has no dev script, no Vite and no index.html, so there is no dev server to start." };
+  const label = [cmd, ...args].join(" ");
+  let out = log + `$ ${label}\n`;
+  const p = spawn(cmd, args, { cwd: ws, env: childEnv({ ...env, PORT: String(port), BROWSER: "none" }), shell: false, detached: true });
+  let exited = null;
+  p.stdout.on("data", (d) => { out = (out + strip(d)).slice(-MAX); });
+  p.stderr.on("data", (d) => { out = (out + strip(d)).slice(-MAX); });
+  p.on("close", (code) => { exited = code ?? 1; });
+  p.on("error", (e) => { out += String(e); exited = 127; });
+  const kill = () => { try { process.kill(-p.pid, "SIGTERM"); } catch {} setTimeout(() => { try { process.kill(-p.pid, "SIGKILL"); } catch {} }, 3000); };
+  const t0 = Date.now(), startupMs = (spec?.startupSec ?? 90) * 1000;
+  let ready = false, httpStatus = null;
+  while (!ready && exited === null && Date.now() - t0 < startupMs) {
+    await new Promise((r) => setTimeout(r, 1000));
+    try { const r = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(2000) }); httpStatus = r.status; ready = true; } catch {}
+  }
+  const info = { command: label, port, startupMs: Date.now() - t0, httpStatus };
+  if (!ready) {
+    kill();
+    const why = exited !== null ? `Dev server exited with code ${exited} during startup.` : `Dev server did not answer on port ${port} within ${startupMs / 1000}s.`;
+    return { ok: false, phase: "failed", exitCode: exited ?? 124, output: `${out}\n${why}`, info };
+  }
+  let ctl = await event({ phase: "ready", output: out, info });
+  while (!ctl.stop && exited === null && Date.now() - t0 < maxMs) {
+    await new Promise((r) => setTimeout(r, 10_000));
+    ctl = await event({ output: out });
+  }
+  const reason = ctl.stop ? "stopped on request" : exited !== null ? `exited with code ${exited}` : `stopped after the ${Math.round(maxMs / 60000)} min limit`;
+  kill();
+  return { ok: exited === null || exited === 0, phase: exited !== null && exited !== 0 ? "failed" : "stopped", exitCode: exited ?? 0, output: `${out}\nDev server ${reason}.`, info };
+}
+
 // Child processes get only a minimal env plus the project's own variables (never the job token).
 function run(cmd, args, extraEnv = {}, timeoutMs = 8 * 60_000) {
   return new Promise((done) => {
@@ -54,7 +115,7 @@ async function walk(dir, acc = []) {
 async function main() {
   const src = await fetch(`${API_URL}/runtime/job/${JOB_ID}/source`, { headers: auth });
   if (!src.ok) throw new Error(`source ${src.status}: ${await src.text()}`);
-  const { kind, script, files, env = {} } = await src.json();
+  const { kind, script, spec, maxMs, files, env = {} } = await src.json();
   await rm(ws, { recursive: true, force: true });
   await mkdir(ws, { recursive: true });
   const original = new Map();
@@ -70,6 +131,10 @@ async function main() {
   let log = "";
   const step = async (label, cmd, args, e) => { const r = await run(cmd, args, e); log += `$ ${label}\n${r.out}\n`; return r; };
 
+  if (kind === "dev" && !pkg) {
+    const d = await devServer(spec, null, {}, env, maxMs ?? 600_000, "");
+    return report({ ...d, diagnostics: [] });
+  }
   if (!pkg && kind !== "format") return report({ ok: false, exitCode: 1, output: "This project has no package.json, so there is nothing to install, build or test.", diagnostics: [] });
   if (pkg) {
     // Install scripts never run (supply-chain safety); test/script kinds run the project's own scripts below.
@@ -114,6 +179,15 @@ async function main() {
       if (!pkg.scripts?.[script]) { r = { code: 1, out: `package.json has no "${script}" script.` }; break; }
       r = await step(`npm run ${script}`, "npm", ["run", script], env);
       break;
+    case "command": {
+      // argv was validated by the API (allowlisted program, workspace-relative args); executed without a shell.
+      const c = await runSplit(spec.program, spec.args, env, (spec.timeoutSec ?? 300) * 1000);
+      return report({ ok: c.code === 0, exitCode: c.code, stdout: c.stdout, stderr: c.stderr, output: `${log}$ ${[spec.program, ...spec.args].join(" ")}\n${c.stdout}${c.stderr}${c.timedOut ? `\n[timed out after ${spec.timeoutSec}s]` : ""}`, diagnostics: tsDiagnostics(c.stdout + c.stderr).slice(0, 200) });
+    }
+    case "dev": {
+      const d = await devServer(spec, pkg, deps, env, maxMs ?? 600_000, log);
+      return report({ ...d, diagnostics: [] });
+    }
     case "format": {
       r = await step("prettier --write .", "npx", ["-y", "prettier@3", "--write", ".", "--ignore-unknown", "--log-level", "warn"]);
       outFiles = [];
