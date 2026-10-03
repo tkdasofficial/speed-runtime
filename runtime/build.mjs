@@ -1,5 +1,8 @@
-// Fetches one project's source from the Speed API, builds it in an isolated temp workspace
-// (WORK_ROOT/{userId}/{projectId}), and posts the static output (or a failure) back.
+// Speed build runtime. Fetches one project's source from the Speed API, builds it in an isolated temp workspace
+// (WORK_ROOT/{userId}/{projectId}) into .output/dist, then:
+//   1. pushes .output/dist to the project's Google Drive static folder (short-lived upload pass from the API),
+//   2. deletes the whole workspace (source + static) and verifies it is gone,
+//   3. reports the Drive file ID back so the app loads the static output from Drive.
 // Only this fixed pipeline runs: npm install --ignore-scripts, then vite build. Project-supplied scripts are never executed.
 import { mkdir, writeFile, readFile, readdir, rm, stat } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
@@ -37,12 +40,32 @@ async function walk(dir, rel = "") {
   }
   return items;
 }
+/** Resumable upload into the given Drive folder; returns the new file ID. */
+async function pushToDrive(upload, content) {
+  const h = { Authorization: `Bearer ${upload.accessToken}` };
+  const start = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true&fields=id", {
+    method: "POST", headers: { ...h, "Content-Type": "application/json; charset=UTF-8", "X-Upload-Content-Type": "application/json" },
+    body: JSON.stringify({ name: upload.name, parents: [upload.folderId], mimeType: "application/json" }),
+  });
+  const loc = start.headers.get("location");
+  if (!start.ok || !loc) throw new Error(`Google Drive upload could not start (${start.status})`);
+  const put = await fetch(loc, { method: "PUT", headers: { "Content-Type": "application/json" }, body: content });
+  const j = await put.json().catch(() => ({}));
+  if (!put.ok || !j.id) throw new Error(`Google Drive upload failed (${put.status})`);
+  return j.id;
+}
+async function cleanup() {
+  await rm(ws, { recursive: true, force: true });
+  return !(await stat(ws).catch(() => null));
+}
 
+let uploaded = null;
 try {
   const res = await fetch(`${base}/source/${PROJECT_ID}/${BUILD_ID}`, { headers: auth });
   if (!res.ok) throw new Error(`Source download failed (${res.status})`);
   const src = await res.json();
-  if (src.framework !== "react-vite" || !Array.isArray(src.files)) throw new Error("Unsupported project");
+  if (src.upload?.accessToken) console.log(`::add-mask::${src.upload.accessToken}`);
+  if (src.framework !== "react-vite" || !Array.isArray(src.files) || !src.upload?.folderId) throw new Error("Unsupported project");
   await rm(ws, { recursive: true, force: true }); await mkdir(ws, { recursive: true });
   for (const f of src.files) {
     const dest = safe(f.path) && inside(ws, f.path);
@@ -54,10 +77,15 @@ try {
   run("npx", ["--no-install", "vite", "build", "--base=./", "--outDir", out, "--emptyOutDir"]);
   if (!(await stat(path.join(out, "index.html")).catch(() => null))) throw new Error("Build produced no index.html");
   const files = await walk(out);
-  console.log(`built ${files.length} files`);
-  await report({ ok: true, files });
+  console.log(`built ${files.length} files in .output/dist`);
+  uploaded = await pushToDrive(src.upload, JSON.stringify({ entry: "index.html", files }));
+  console.log("pushed .output/dist to Google Drive");
+  const cleaned = await cleanup();
+  console.log(cleaned ? "deleted workspace (source + static)" : "workspace delete could not be verified");
+  await report({ ok: true, driveFileId: uploaded, cleaned });
 } catch (e) {
   console.error(e.message);
+  await cleanup().catch(() => {});
   await report({ ok: false, error: e.message.slice(0, 4000) }).catch(() => {});
   process.exitCode = 1;
 } finally {
