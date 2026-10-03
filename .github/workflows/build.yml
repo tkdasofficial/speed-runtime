@@ -1,0 +1,40 @@
+# Speed build runtime. Triggered only by the Speed API (workflow_dispatch). Builds one generated
+# React + TypeScript + Vite project in a throwaway workspace and posts the static output back.
+# Nothing generated is ever committed to this repository.
+name: build
+run-name: build ${{ inputs.project_id }} (${{ inputs.build_id }})
+on:
+  workflow_dispatch:
+    inputs:
+      build_id: { required: true, type: string }
+      project_id: { required: true, type: string }
+      user_id: { required: true, type: string }
+      api_url: { required: true, type: string }
+      token: { required: true, type: string }
+permissions:
+  contents: read
+concurrency:
+  group: build-${{ inputs.project_id }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Mask build token
+        run: echo "::add-mask::${{ inputs.token }}"
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - name: Build project
+        env:
+          BUILD_ID: ${{ inputs.build_id }}
+          PROJECT_ID: ${{ inputs.project_id }}
+          USER_ID: ${{ inputs.user_id }}
+          API_URL: ${{ inputs.api_url }}
+          BUILD_TOKEN: ${{ inputs.token }}
+          WORK_ROOT: ${{ runner.temp }}/workspace
+        run: node runtime/build.mjs
+      - name: Clean workspace
+        if: always()
+        run: rm -rf "${{ runner.temp }}/workspace"
