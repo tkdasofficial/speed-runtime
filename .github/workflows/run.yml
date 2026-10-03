@@ -10,10 +10,11 @@ on:
       project_id: { required: true, type: string }
       api_url: { required: true, type: string }
       token: { required: true, type: string }
+      lane: { required: false, type: string, default: cmd }
 permissions:
   contents: read
 concurrency:
-  group: run-${{ inputs.project_id }}
+  group: run-${{ inputs.project_id }}-${{ inputs.lane }}
   cancel-in-progress: false
 jobs:
   run:
