@@ -13,7 +13,7 @@ if (![BUILD_ID, PROJECT_ID, USER_ID].every((v) => ID.test(v ?? "")) || !/^https:
 const auth = { Authorization: `Bearer ${BUILD_TOKEN}` };
 const base = `${API_URL}/runtime`;
 const ws = path.resolve(WORK_ROOT, USER_ID, PROJECT_ID);
-const out = path.resolve(WORK_ROOT, USER_ID, `${PROJECT_ID}.out`);
+const out = path.join(ws, ".output", "dist"); // framework output convention: .output/dist/
 
 const safe = (p) => typeof p === "string" && p.length <= 400 && !p.startsWith("/") && !p.includes("\\") && !/^[a-zA-Z]:/.test(p) && !/[\u0000-\u001f]/.test(p) && p.split("/").every((s) => s && s !== "." && s !== "..");
 const inside = (root, p) => { const r = path.resolve(root, p); return r.startsWith(root + path.sep) ? r : null; };
@@ -61,5 +61,5 @@ try {
   await report({ ok: false, error: e.message.slice(0, 4000) }).catch(() => {});
   process.exitCode = 1;
 } finally {
-  await rm(ws, { recursive: true, force: true }); await rm(out, { recursive: true, force: true });
+  await rm(ws, { recursive: true, force: true });
 }
