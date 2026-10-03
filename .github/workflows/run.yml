@@ -1,0 +1,37 @@
+# Speed command runtime. Triggered only by the Speed API (workflow_dispatch). Runs one command
+# (install / build / typecheck / lint / test / format / script) for one project in a throwaway workspace
+# and posts the real result back. Nothing is ever committed to this repository.
+name: run
+run-name: ${{ inputs.job_id }} (${{ inputs.project_id }})
+on:
+  workflow_dispatch:
+    inputs:
+      job_id: { required: true, type: string }
+      project_id: { required: true, type: string }
+      api_url: { required: true, type: string }
+      token: { required: true, type: string }
+permissions:
+  contents: read
+concurrency:
+  group: run-${{ inputs.project_id }}
+  cancel-in-progress: false
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Mask job token
+        run: echo "::add-mask::${{ inputs.token }}"
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - name: Run command
+        env:
+          JOB_ID: ${{ inputs.job_id }}
+          API_URL: ${{ inputs.api_url }}
+          JOB_TOKEN: ${{ inputs.token }}
+          WORK_ROOT: ${{ runner.temp }}/workspace
+        run: node runtime/run.mjs
+      - name: Clean workspace
+        if: always()
+        run: rm -rf "${{ runner.temp }}/workspace"
