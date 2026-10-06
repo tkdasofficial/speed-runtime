@@ -77,6 +77,41 @@ async function devServer(spec, pkg, deps, env, maxMs, log) {
   return { ok: exited === null || exited === 0, phase: exited !== null && exited !== 0 ? "failed" : "stopped", exitCode: exited ?? 0, output: `${out}\nDev server ${reason}.`, info };
 }
 
+
+// Visual preview verification: real build → `vite preview` → headless Chromium (runtime/preview.mjs) → screenshots
+// and browser diagnostics. Built unminified so runtime errors keep readable component names.
+async function previewCheck(deps, env, log) {
+  if (!deps.vite) return { ok: false, exitCode: 1, output: log + "Preview verification needs a Vite project.", preview: { stage: "build", error: "not a Vite project" } };
+  const b = await run("npx", ["--no-install", "vite", "build", "--minify", "false"], env);
+  log += `$ vite build --minify false\n${b.out}\n`;
+  if (b.code !== 0) return { ok: false, exitCode: b.code, output: log, diagnostics: [...tsDiagnostics(b.out), ...buildDiagnostics(b.out)], preview: { stage: "build", error: b.out.slice(-4000) } };
+  const pw = "/tmp/pw";
+  const inst = await run("npm", ["install", "--prefix", pw, "playwright@1.49.1", "--no-audit", "--no-fund", "--loglevel=error"], {}, 4 * 60_000);
+  const br = inst.code === 0 ? await run(`${pw}/node_modules/.bin/playwright`, ["install", "chromium"], {}, 5 * 60_000) : inst;
+  if (br.code !== 0) return { ok: false, exitCode: br.code, output: `${log}Browser setup failed:\n${br.out.slice(-3000)}`, preview: { stage: "browser", error: "Headless browser could not be installed" } };
+  const port = 4173;
+  const p = spawn("npx", ["--no-install", "vite", "preview", "--host", "127.0.0.1", "--port", String(port), "--strictPort"], { cwd: ws, env: childEnv(env), shell: false, detached: true });
+  let srv = "", exited = null;
+  p.stdout.on("data", (d) => { srv = (srv + strip(d)).slice(-20_000); });
+  p.stderr.on("data", (d) => { srv = (srv + strip(d)).slice(-20_000); });
+  p.on("close", (c) => { exited = c ?? 1; });
+  const kill = () => { try { process.kill(-p.pid, "SIGKILL"); } catch {} };
+  try {
+    let ready = false;
+    for (let i = 0; i < 60 && !ready && exited === null; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      try { await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(2000) }); ready = true; } catch {}
+    }
+    if (!ready) return { ok: false, exitCode: exited ?? 124, output: `${log}$ vite preview\n${srv}\nPreview server did not start.`, preview: { stage: "server", error: srv.slice(-2000) || "Preview server did not start" } };
+    const script = new URL("./preview.mjs", import.meta.url).pathname;
+    const v = await run("node", [script, `http://127.0.0.1:${port}/`, `${pw}/node_modules/playwright/index.mjs`], {}, 3 * 60_000);
+    const at = v.out.lastIndexOf("@@PREVIEW@@");
+    if (at < 0) return { ok: false, exitCode: v.code || 1, output: `${log}Browser check crashed:\n${v.out.slice(-3000)}`, preview: { stage: "browser", error: v.out.slice(-2000) } };
+    const result = JSON.parse(v.out.slice(at + 11).trim().split("\n")[0]);
+    return { ok: true, exitCode: 0, output: `${log}Preview captured (${result.views.length} viewports).`, diagnostics: [], preview: { stage: "captured", ...result } };
+  } finally { kill(); }
+}
+
 // Child processes get only a minimal env plus the project's own variables (never the job token).
 function run(cmd, args, extraEnv = {}, timeoutMs = 8 * 60_000) {
   return new Promise((done) => {
@@ -188,6 +223,8 @@ async function main() {
       const d = await devServer(spec, pkg, deps, env, maxMs ?? 600_000, log);
       return report({ ...d, diagnostics: [] });
     }
+    case "preview":
+      return report(await previewCheck(deps, env, log));
     case "format": {
       r = await step("prettier --write .", "npx", ["-y", "prettier@3", "--write", ".", "--ignore-unknown", "--log-level", "warn"]);
       outFiles = [];
