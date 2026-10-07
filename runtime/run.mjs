@@ -85,6 +85,10 @@ async function previewCheck(deps, env, log) {
   const b = await run("npx", ["--no-install", "vite", "build", "--minify", "false"], env);
   log += `$ vite build --minify false\n${b.out}\n`;
   if (b.code !== 0) return { ok: false, exitCode: b.code, output: log, diagnostics: [...tsDiagnostics(b.out), ...buildDiagnostics(b.out)], preview: { stage: "build", error: b.out.slice(-4000) } };
+  // Build-level style evidence: the CSS files Vite actually emitted (empty = no stylesheet reached the bundle).
+  const cssAssets = [];
+  try { const dist = join(ws, "dist"); const walk = async (d) => { for (const e of await readdir(d, { withFileTypes: true })) { const p = join(d, e.name); if (e.isDirectory()) await walk(p); else if (e.name.endsWith(".css")) cssAssets.push({ file: relative(dist, p), bytes: (await stat(p)).size }); } }; await walk(dist); } catch {}
+  log += `CSS assets in build: ${cssAssets.map((a) => `${a.file} (${a.bytes} B)`).join(", ") || "none"}\n`;
   const pw = "/tmp/pw";
   const inst = await run("npm", ["install", "--prefix", pw, "playwright@1.49.1", "--no-audit", "--no-fund", "--loglevel=error"], {}, 4 * 60_000);
   const br = inst.code === 0 ? await run(`${pw}/node_modules/.bin/playwright`, ["install", "chromium"], {}, 5 * 60_000) : inst;
@@ -108,7 +112,7 @@ async function previewCheck(deps, env, log) {
     const at = v.out.lastIndexOf("@@PREVIEW@@");
     if (at < 0) return { ok: false, exitCode: v.code || 1, output: `${log}Browser check crashed:\n${v.out.slice(-3000)}`, preview: { stage: "browser", error: v.out.slice(-2000) } };
     const result = JSON.parse(v.out.slice(at + 11).trim().split("\n")[0]);
-    return { ok: true, exitCode: 0, output: `${log}Preview captured (${result.views.length} viewports).`, diagnostics: [], preview: { stage: "captured", ...result } };
+    return { ok: true, exitCode: 0, output: `${log}Preview captured (${result.views.length} viewports).`, diagnostics: [], preview: { stage: "captured", ...result, build: { cssAssets } } };
   } finally { kill(); }
 }
 
