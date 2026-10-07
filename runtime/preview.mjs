@@ -62,6 +62,18 @@ async function inspect(browser, vp) {
       scrollWidth: document.documentElement.scrollWidth, viewportWidth: vw, horizontalOverflow: document.documentElement.scrollWidth > vw + 8,
       elementsOutsideViewport: outside, documentHeight: document.documentElement.scrollHeight, viewportHeight: vh,
       errorOverlay: !!document.querySelector("vite-error-overlay"),
+      styles: (() => {
+        // Browser-level style evidence: loaded sheets/rules, failed <link>s, class coverage and user-agent-default look.
+        let rules = 0, unreadable = 0; const selectors = new Set();
+        for (const sh of document.styleSheets) { try { const walk = (list) => { for (const r of list) { rules++; if (r.selectorText) for (const m of r.selectorText.matchAll(/\.(-?[A-Za-z_][\w-]*)/g)) selectors.add(m[1]); if (r.cssRules) walk(r.cssRules); } }; walk(sh.cssRules); } catch { unreadable++; } }
+        const links = [...document.querySelectorAll('link[rel="stylesheet"]')].map((l) => ({ href: l.getAttribute("href"), loaded: !!l.sheet }));
+        const classes = new Set(); for (const el of document.body.querySelectorAll("[class]")) for (const c of (el.getAttribute("class") || "").split(/\s+/)) if (/^[A-Za-z_][\w-]*$/.test(c)) classes.add(c);
+        const unmatched = [...classes].filter((c) => !selectors.has(c));
+        const bs = getComputedStyle(document.body), btn = document.querySelector("button"), a = document.querySelector("a");
+        return { sheets: document.styleSheets.length, rules, unreadable, links, classCount: classes.size, unmatchedClasses: unmatched.slice(0, 20), unmatchedCount: unmatched.length,
+          bodyMargin: bs.margin, bodyFont: bs.fontFamily.slice(0, 80), bodyBg: bs.backgroundColor,
+          defaultLinkColor: a ? getComputedStyle(a).color === "rgb(0, 0, 238)" : null, defaultButton: btn ? getComputedStyle(btn).backgroundColor === "rgb(239, 239, 239)" || getComputedStyle(btn).backgroundColor === "rgb(240, 240, 240)" : null };
+      })(),
     };
   }).catch((e) => ({ evaluateError: cut(e.message, 300) })) : null;
   let screenshot = null;
