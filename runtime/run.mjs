@@ -80,7 +80,7 @@ async function devServer(spec, pkg, deps, env, maxMs, log) {
 
 // Visual preview verification: real build → `vite preview` → headless Chromium (runtime/preview.mjs) → screenshots
 // and browser diagnostics. Built unminified so runtime errors keep readable component names.
-async function previewCheck(deps, env, log) {
+async function previewCheck(deps, env, log, opts = null) {
   if (!deps.vite) return { ok: false, exitCode: 1, output: log + "Preview verification needs a Vite project.", preview: { stage: "build", error: "not a Vite project" } };
   const b = await run("npx", ["--no-install", "vite", "build", "--minify", "false"], env);
   log += `$ vite build --minify false\n${b.out}\n`;
@@ -108,7 +108,7 @@ async function previewCheck(deps, env, log) {
     }
     if (!ready) return { ok: false, exitCode: exited ?? 124, output: `${log}$ vite preview\n${srv}\nPreview server did not start.`, preview: { stage: "server", error: srv.slice(-2000) || "Preview server did not start" } };
     const script = new URL("./preview.mjs", import.meta.url).pathname;
-    const v = await run("node", [script, `http://127.0.0.1:${port}/`, `${pw}/node_modules/playwright/index.mjs`], {}, 3 * 60_000);
+    const v = await run("node", [script, `http://127.0.0.1:${port}/`, `${pw}/node_modules/playwright/index.mjs`, JSON.stringify(opts ?? {})], {}, 6 * 60_000);
     const at = v.out.lastIndexOf("@@PREVIEW@@");
     if (at < 0) return { ok: false, exitCode: v.code || 1, output: `${log}Browser check crashed:\n${v.out.slice(-3000)}`, preview: { stage: "browser", error: v.out.slice(-2000) } };
     const result = JSON.parse(v.out.slice(at + 11).trim().split("\n")[0]);
@@ -228,7 +228,7 @@ async function main() {
       return report({ ...d, diagnostics: [] });
     }
     case "preview":
-      return report(await previewCheck(deps, env, log));
+      { let o = null; try { o = script ? JSON.parse(script) : null; } catch {} return report(await previewCheck(deps, env, log, o)); }
     case "format": {
       r = await step("prettier --write .", "npx", ["-y", "prettier@3", "--write", ".", "--ignore-unknown", "--log-level", "warn"]);
       outFiles = [];
